@@ -1,0 +1,80 @@
+name: "Docker"
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 0 * * *" # every day at midnight
+
+permissions:
+  contents: "write"
+  packages: "write"
+
+env:
+  CONTAINER_REGISTRY: ghcr.io
+  CONTAINER_NAME: ${{ github.repository }}
+
+jobs:
+  release:
+    runs-on: "ubuntu-latest"
+
+    steps:
+      - name: "Checkout Repository"
+        uses: "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"
+
+      - name: "Reactivate Repository"
+        uses: "custom-workflows/reactivate@latest"
+        with:
+          commit_message: "github-actions: Reactivate repository"
+          committer_username: "GitHub Actions [Bot]"
+          committer_email: "github-actions[bot]@users.noreply.github.com"
+          days_elapsed: 50
+
+      - name: "Fetch Latest Version [pypi.org]"
+        id: "pypi"
+        shell: "bash"
+        run: |
+          latest_version=$(curl -sSL https://pypi.org/pypi/yt-dlp/json | jq '.info.version')
+
+          echo "latest_version=$latest_version" >> "$GITHUB_OUTPUT"
+
+      - name: "Fetch Latest Version [ghcr.io]"
+        continue-on-error: true
+        id: "ghcr"
+        shell: "bash"
+        run: |-
+          curl \
+            --silent \
+            --fail \
+            --head \
+            --header "Authorization: Bearer $(echo ${{ secrets.GITHUB_TOKEN }} | base64 )" \
+            https://${{ env.CONTAINER_REGISTRY }}/v2/${{ env.CONTAINER_NAME }}/manifests/${{ steps.pypi.outputs.latest_version }}
+
+      - name: "Login [ghcr.io]"
+        if: ${{ steps.ghcr.outcome == 'failure' }}
+        uses: "docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567"
+        with:
+          registry: ${{ env.CONTAINER_REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: "Extract MetaData (Tags, Labels)"
+        if: ${{ steps.ghcr.outcome == 'failure' }}
+        id: "metadata"
+        uses: "docker/metadata-action@369eb591f429131d6889c46b94e711f089e6ca96"
+        with:
+          images: ${{ env.CONTAINER_REGISTRY }}/${{ env.CONTAINER_NAME }}
+          tags: |
+            ${{ steps.pypi.outputs.latest_version }}
+            latest
+          labels: |
+            org.opencontainers.image.title=yt-dlp
+            org.opencontainers.image.version=${{ steps.pypi.outputs.latest_version }}
+
+      - name: "Build & Push"
+        if: ${{ steps.ghcr.outcome == 'failure' }}
+        uses: "docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991"
+        with:
+          context: "."
+          push: "true"
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
